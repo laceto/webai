@@ -6,7 +6,7 @@ from enum import Enum
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
 from langchain_core.documents import Document
-from tavily import TavilyClient
+# from tavily import TavilyClient
 
 
 class SearchProvider(Enum):
