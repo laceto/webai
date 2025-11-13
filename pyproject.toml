@@ -1,16 +1,20 @@
-[project]
+[tool.poetry]
 name = "webai"
 version = "0.1.0"
 description = ""
 authors = [{ name = "Luigi", email = "luigi@example.com" }]
 readme = "README.md"
-requires-python = ">=3.9"
-dependencies = [
-    "langchain_openai>=1.0.2",
-    "langchain_tavily>=0.2.13",
-    "langchain_core>=1.0.4"
+
+packages = [
+    { include = "webai"}
 ]
 
+[tool.poetry.dependencies]
+langchain_core = ">=1.0.2"
+langchain_tavily = ">=0.2.13"
+langchain_core = ">=1.0.4"
+
+
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
