@@ -2,7 +2,7 @@
 name = "webai"
 version = "0.1.0"
 description = ""
-authors = [{ name = "Luigi", email = "luigi@example.com" }]
+authors = ["Luigi <luigi@example.com>"]
 readme = "README.md"
 
 packages = [
@@ -10,6 +10,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
+python = ">=3.10,<4.0"
 langchain_openai = ">=1.0.2"
 langchain_tavily = ">=0.2.13"
 langchain_core = ">=1.0.4"
