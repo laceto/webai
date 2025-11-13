@@ -1,0 +1,17 @@
+[project]
+name = "webai"
+version = "0.1.0"
+description = ""
+authors = [{ name = "Luigi", email = "luigi@example.com" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "requests>=2.28",
+    "yfinance>=0.2"
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
