@@ -28,6 +28,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Windows device-name artifact
+nul
+
 generate_structure.py
 # .gitignore
 .env
