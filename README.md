@@ -295,12 +295,14 @@ NewsResearcher(
 | Notebook | Covers |
 |---|---|
 | `tools_guide.ipynb` | `SearchProvider`, `SearchResult`, all 7 `WebSearcher` formatters, error handling |
-| `ticker_guide.ipynb` | `TickerResearcher`, both pipelines, portfolio batch, model schemas |
+| `ticker_guide.ipynb` | `TickerResearcher`, `research_ticker`/`research_portfolio`/`research_sector`, model schemas |
+| `news_guide.ipynb` | `NewsResearcher`, all four fetch methods, `NewsItem`/`NewsDigest`/`SectorMover` schemas |
 | `usage_example.ipynb` | Original `WebSearcher` demo |
 
 ```bash
 jupyter notebook tools_guide.ipynb
 jupyter notebook ticker_guide.ipynb
+jupyter notebook news_guide.ipynb
 ```
 
 ---
