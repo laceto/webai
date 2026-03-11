@@ -30,15 +30,12 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal, Optional
-from urllib.parse import urlparse
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic import BaseModel, Field
 
 from webai.tools import SearchProvider, SearchResult, WebSearcher
-from query_translation import decompose_query, expand_query, step_back_query
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +59,13 @@ TRUSTED_DOMAINS: list[str] = [
     "morningstar.com",
     "zacks.com",
     "thestreet.com",
+    "benzinga.com",
+    "businesswire.com",
+    "prnewswire.com",
+    "alphastreet.com",
+    "stockanalysis.com",
+    "federalreserve.gov",
+    "apnews.com",
 ]
 
 # ---------------------------------------------------------------------------
@@ -236,6 +240,13 @@ class TickerResearch(BaseModel):
             "and may not reflect current market conditions."
         ),
     )
+    earnings_date: Optional[str] = Field(
+        default=None,
+        description=(
+            "Upcoming or most-recent earnings date provided by the caller "
+            "(any human-readable format, e.g. '2026-05-28'). None if not supplied."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -398,22 +409,30 @@ class TickerResearcher:
         self,
         symbol: str,
         company_name: Optional[str] = None,
+        earnings_date: Optional[str] = None,
+        days_back: Optional[int] = None,
     ) -> TickerResearch:
         """
         Run the full research pipeline for a ticker symbol.
 
         Pipeline:
             1. Normalise symbol to uppercase.
-            2. Build base query.
+            2. Build base query (appends earnings date when provided).
             3. Fan-out to multiple query variants (LLM-assisted; degrades gracefully).
             4. Execute all queries in parallel against Tavily ``topic="finance"``.
             5. Deduplicate by URL.
             6. Filter to trusted domains (falls back to unfiltered if all removed).
             7. Synthesise into a validated ``TickerResearch`` via structured output.
+            8. Post-set ``earnings_date`` on the result when provided.
 
         Args:
             symbol: Ticker symbol (e.g. ``"NVDA"``).  Whitespace is stripped.
             company_name: Optional company name to anchor queries and synthesis.
+            earnings_date: Optional upcoming/recent earnings date in any
+                human-readable format (e.g. ``"2026-05-28"``).  When provided,
+                it is appended to the base query and recorded in the result.
+            days_back: Restrict Tavily results to the last *N* days.  ``None``
+                applies no date restriction (default behaviour).
 
         Returns:
             A fully validated ``TickerResearch`` instance.
@@ -427,9 +446,18 @@ class TickerResearcher:
         if not symbol:
             raise ValueError("symbol must be a non-empty string.")
 
-        logger.debug("research_ticker | symbol=%s company_name=%r", symbol, company_name)
+        logger.debug(
+            "research_ticker | symbol=%s company_name=%r earnings_date=%r days_back=%r",
+            symbol, company_name, earnings_date, days_back,
+        )
 
         base_query = self._build_base_query(symbol, company_name)
+        if earnings_date:
+            company_label = company_name or symbol
+            base_query = (
+                f"{symbol} {company_label} stock analysis news earnings {earnings_date}"
+            )
+
         all_queries = self._fan_out_queries(
             base_query,
             expand_examples=_FINANCE_EXPAND_EXAMPLES,
@@ -440,7 +468,7 @@ class TickerResearcher:
             "research_ticker | %d queries after fan-out: %s", len(all_queries), all_queries
         )
 
-        raw_results = self._run_searches_parallel(all_queries)
+        raw_results = self._run_searches_parallel(all_queries, days=days_back)
         logger.debug("research_ticker | %d raw results", len(raw_results))
 
         deduped = self._deduplicate(raw_results)
@@ -464,7 +492,19 @@ class TickerResearcher:
                 "Check your Tavily API key and network connectivity."
             )
 
-        return self._synthesize(symbol, company_name, filtered)
+        earnings_note = ""
+        if earnings_date is not None:
+            earnings_note = (
+                f"- The caller has provided an earnings date of '{earnings_date}'. "
+                f"Reference it in key_catalyst if relevant.\n"
+            )
+
+        result_obj = self._synthesize(symbol, company_name, filtered, earnings_note=earnings_note)
+
+        if earnings_date is not None:
+            result_obj = result_obj.model_copy(update={"earnings_date": earnings_date})
+
+        return result_obj
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -490,203 +530,47 @@ class TickerResearcher:
         decompose_examples: list[dict],
         step_back_examples: list[dict],
     ) -> list[str]:
-        """
-        Generate multiple query variants from ``base_query`` using LLM-assisted
-        query translation.
+        """Thin wrapper — delegates to :func:`webai.utils.fan_out_queries`."""
+        from webai import utils
+        return utils.fan_out_queries(
+            self._model,
+            base_query,
+            expand_examples,
+            decompose_examples,
+            step_back_examples,
+        )
 
-        Strategy:
-            - ``expand_query``    → paraphrases
-            - ``decompose_query`` → sub-questions
-            - ``step_back_query`` → macro / broadened context
-
-        The few-shot examples are supplied by the caller so the same method
-        works for both ticker and sector research (no hidden coupling to a
-        specific example list).
-
-        Each step is wrapped in a ``try/except``; failures are logged at WARNING
-        and the pipeline continues.  ``base_query`` is always index 0 in the
-        returned list, and duplicates are removed (order preserved).
-
-        Args:
-            base_query: The anchor query string.
-            expand_examples: Few-shot examples for ``expand_query``.
-            decompose_examples: Few-shot examples for ``decompose_query``.
-            step_back_examples: Few-shot examples for ``step_back_query``.
-
-        Returns:
-            At least ``[base_query]``.
-        """
-        seen: dict[str, None] = {base_query: None}  # ordered-set via dict
-        queries: list[str] = [base_query]
-
-        # --- expand (paraphrases) ---
-        try:
-            expand_results = expand_query(
-                self._model,
-                [base_query],
-                few_shot_examples=expand_examples,
-            )
-            for r in expand_results:
-                q = r.paraphrased_query.strip()
-                if q and q not in seen:
-                    seen[q] = None
-                    queries.append(q)
-            logger.debug("_fan_out_queries | expand added %d", len(expand_results))
-        except Exception as exc:
-            logger.warning("expand_query failed (skipping): %s", exc)
-
-        # --- decompose (sub-questions) ---
-        try:
-            decompose_results = decompose_query(
-                self._model,
-                [base_query],
-                few_shot_examples=decompose_examples,
-            )
-            for r in decompose_results:
-                q = r.decomposed_query.strip()
-                if q and q not in seen:
-                    seen[q] = None
-                    queries.append(q)
-            logger.debug("_fan_out_queries | decompose added %d", len(decompose_results))
-        except Exception as exc:
-            logger.warning("decompose_query failed (skipping): %s", exc)
-
-        # --- step-back (macro context) ---
-        try:
-            step_back_results = step_back_query(
-                self._model,
-                [base_query],
-                num_queries=3,
-                few_shot_examples=step_back_examples,
-            )
-            for r in step_back_results:
-                q = r.general_query.strip()
-                if q and q not in seen:
-                    seen[q] = None
-                    queries.append(q)
-            logger.debug("_fan_out_queries | step_back added %d", len(step_back_results))
-        except Exception as exc:
-            logger.warning("step_back_query failed (skipping): %s", exc)
-
-        return queries
-
-    def _run_searches_parallel(self, queries: list[str]) -> list[SearchResult]:
-        """
-        Execute Tavily searches for all queries concurrently.
-
-        Each search uses ``topic="finance"`` (Requirement 1).  Individual query
-        failures are logged at WARNING and skipped; the method never raises.
-
-        Args:
-            queries: List of query strings to search.
-
-        Returns:
-            Flat list of ``SearchResult`` objects in completion order.
-        """
-        if not queries:
-            return []
-
-        all_results: list[SearchResult] = []
-        n_workers = min(len(queries), self.max_workers)
-
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            future_to_query = {
-                executor.submit(
-                    self._searcher.search_tavily, q, "finance"
-                ): q
-                for q in queries
-            }
-            for future in as_completed(future_to_query):
-                q = future_to_query[future]
-                try:
-                    results = future.result()
-                    logger.debug(
-                        "_run_searches_parallel | query=%r  results=%d", q, len(results)
-                    )
-                    all_results.extend(results)
-                except Exception as exc:
-                    logger.warning(
-                        "_run_searches_parallel | query=%r failed: %s", q, exc
-                    )
-
-        return all_results
+    def _run_searches_parallel(
+        self,
+        queries: list[str],
+        days: Optional[int] = None,
+    ) -> list[SearchResult]:
+        """Thin wrapper — delegates to :func:`webai.utils.run_searches_parallel`."""
+        from webai import utils
+        return utils.run_searches_parallel(
+            self._searcher,
+            queries,
+            topic="finance",
+            max_workers=self.max_workers,
+            days=days,
+        )
 
     def _deduplicate(self, results: list[SearchResult]) -> list[SearchResult]:
-        """
-        Remove duplicate results by URL (``result.source``).
-
-        Results with an empty source are always kept (no deduplication key).
-        First occurrence wins; subsequent duplicates are dropped.
-
-        Args:
-            results: Raw, possibly-duplicate search results.
-
-        Returns:
-            Deduplicated list preserving original relative order.
-        """
-        seen_sources: set[str] = set()
-        deduped: list[SearchResult] = []
-        for result in results:
-            if not result.source:
-                # No URL — keep unconditionally (cannot dedup without a key).
-                deduped.append(result)
-            elif result.source not in seen_sources:
-                seen_sources.add(result.source)
-                deduped.append(result)
-        return deduped
+        """Thin wrapper — delegates to :func:`webai.utils.deduplicate`."""
+        from webai import utils
+        return utils.deduplicate(results)
 
     def _filter_by_domain(self, results: list[SearchResult]) -> list[SearchResult]:
-        """
-        Retain only results whose URL belongs to ``self.trusted_domains``
-        (Requirement 4).
-
-        Matching rules:
-            - ``netloc == domain`` (exact match, e.g. ``wsj.com``)
-            - ``netloc.endswith("." + domain)`` (subdomain match, e.g.
-              ``finance.yahoo.com`` when domain is ``finance.yahoo.com``)
-            - ``www.`` prefix is stripped from ``netloc`` before comparison.
-
-        Results with an empty source are excluded (no URL to evaluate).
-        ``urlparse`` failures are logged at WARNING and the result is skipped.
-
-        Args:
-            results: Deduplicated search results.
-
-        Returns:
-            Filtered list; may be empty if no results match the allowlist.
-        """
-        filtered: list[SearchResult] = []
-        for result in results:
-            if not result.source:
-                logger.debug("_filter_by_domain | skipping empty source")
-                continue
-            try:
-                parsed = urlparse(result.source)
-                netloc = parsed.netloc.lower()
-                # Strip www. so "www.reuters.com" matches "reuters.com".
-                if netloc.startswith("www."):
-                    netloc = netloc[4:]
-                matched = any(
-                    netloc == domain or netloc.endswith("." + domain)
-                    for domain in self.trusted_domains
-                )
-                if matched:
-                    filtered.append(result)
-                else:
-                    logger.debug(
-                        "_filter_by_domain | excluded %s (netloc=%s)", result.source, netloc
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "_filter_by_domain | urlparse failed for %r: %s", result.source, exc
-                )
-        return filtered
+        """Thin wrapper — delegates to :func:`webai.utils.filter_by_domain`."""
+        from webai import utils
+        return utils.filter_by_domain(results, self.trusted_domains)
 
     def _synthesize(
         self,
         symbol: str,
         company_name: Optional[str],
         results: list[SearchResult],
+        earnings_note: str = "",
     ) -> TickerResearch:
         """
         Call the LLM structured-output chain to synthesise a ``TickerResearch``
@@ -746,6 +630,7 @@ class TickerResearcher:
             f"- Set `sources` to the list of source URLs provided above.\n"
             f"- Set `freshness_warning` to true if the sources appear to be more than "
             f"  30 days old or if dates cannot be determined.\n"
+            + earnings_note
         )
 
         logger.debug(
@@ -844,6 +729,59 @@ class TickerResearcher:
             )
 
         return self._synthesize_sector(sector, filtered)
+
+    # ------------------------------------------------------------------
+    # Portfolio research
+    # ------------------------------------------------------------------
+
+    def research_portfolio(
+        self,
+        symbols: list,
+        days_back: Optional[int] = None,
+    ) -> dict:
+        """
+        Run :meth:`research_ticker` for each symbol, isolating failures per-ticker.
+
+        Each entry in *symbols* is either a bare ticker string (e.g. ``"NVDA"``)
+        or a ``(ticker, company_name)`` tuple.  Failures for individual tickers
+        are caught, logged at WARNING, and excluded from the output — the batch
+        never aborts.
+
+        Args:
+            symbols: List of ticker strings or ``(ticker, company_name)`` tuples.
+            days_back: Passed through to each :meth:`research_ticker` call.
+                ``None`` applies no date restriction.
+
+        Returns:
+            ``dict[str, TickerResearch]`` keyed by uppercase ticker symbol,
+            containing only the successfully researched tickers.
+        """
+        out: dict[str, TickerResearch] = {}
+
+        for entry in symbols:
+            if isinstance(entry, tuple):
+                symbol, company_name = entry[0], entry[1] if len(entry) > 1 else None
+            else:
+                symbol, company_name = str(entry), None
+
+            symbol = symbol.strip().upper()
+
+            try:
+                result = self.research_ticker(
+                    symbol,
+                    company_name=company_name,
+                    days_back=days_back,
+                )
+                out[symbol] = result
+            except Exception as exc:
+                logger.warning("research_portfolio | %s failed: %s", symbol, exc)
+
+        logger.info(
+            "research_portfolio | %d/%d completed",
+            len(out),
+            len(symbols),
+        )
+        return out
 
     # ------------------------------------------------------------------
     # Sector research — private helpers

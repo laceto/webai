@@ -3,6 +3,7 @@ import os
 import traceback  # noqa: F401 — imported at top; used via exc_info in logger calls
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional, Literal
 
@@ -147,6 +148,7 @@ class WebSearcher:
         self,
         query: str,
         topic: Literal["general", "news", "finance"] = "general",
+        days: Optional[int] = None,
     ) -> list[SearchResult]:
         """
         Search using the Tavily API.
@@ -155,6 +157,10 @@ class WebSearcher:
             query: Search query string.
             topic: Tavily topic category — ``"general"``, ``"news"``, or
                 ``"finance"``.
+            days: When set, restricts results to the last *N* days by computing
+                a ``start_date`` (YYYY-MM-DD, UTC) and passing it to the Tavily
+                REST API.  ``None`` (the default) applies no date restriction
+                and preserves existing caller behaviour exactly.
 
         Returns:
             Up to ``max_results`` standardized search results with real titles,
@@ -170,10 +176,18 @@ class WebSearcher:
                 "the TAVILY_API_KEY environment variable."
             )
 
-        logger.debug("search_tavily | query=%r  topic=%s", query, topic)
+        logger.debug("search_tavily | query=%r  topic=%s  days=%r", query, topic, days)
+
+        invoke_dict: dict = {"query": query, "topic": topic}
+        if days is not None:
+            start_date = (
+                datetime.now(timezone.utc) - timedelta(days=days)
+            ).strftime("%Y-%m-%d")
+            invoke_dict["start_date"] = start_date
+            logger.debug("search_tavily | start_date=%s", start_date)
 
         try:
-            response = self.tavily_tool.invoke({"query": query, "topic": topic})
+            response = self.tavily_tool.invoke(invoke_dict)
             logger.debug(
                 "search_tavily | response type=%s", type(response).__name__
             )
