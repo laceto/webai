@@ -4,12 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**webai** is a Python library (v0.1.0) with two layers:
+**webai** is a Python library (v0.1.0) with three layers:
 
 1. **Web search** (`webai/tools.py`) — unified interface over Tavily and OpenAI web search,
    normalizing results into a `SearchResult` dataclass with optional LangChain `Document` conversion.
 2. **Research pipelines** (`webai/ticker.py`) — multi-query Tavily fan-out + LLM structured-output
-   synthesis for individual stock tickers (`research_ticker`) and market sectors (`research_sector`).
+   synthesis for individual stock tickers (`research_ticker`, `research_portfolio`) and market
+   sectors (`research_sector`).
+3. **News pipeline** (`webai/news.py`) — breaking news extraction, catalyst analysis, and daily
+   market digest synthesis (`NewsResearcher`).
+
+Shared pipeline utilities (fan-out, parallel search, dedup, domain filter) live in `webai/utils.py`
+and are the single source of truth for all research classes.
 
 ## Setup & Commands
 
@@ -52,7 +58,8 @@ if the missing provider is called.  `__init__` never raises.
 2. On failure with `fallback=True`, it automatically retries with the other provider
 3. Tavily returns structured results (real titles, URLs, snippets); OpenAI returns one synthesized
    prose answer wrapped as a single `SearchResult`
-4. No content truncation is applied at parse time
+4. `search_tavily(query, topic, days=None)` — when `days` is set, a `start_date` (YYYY-MM-DD, UTC)
+   is computed and passed to the Tavily API. `days=None` preserves existing behaviour exactly.
 
 **Result formatting methods on `WebSearcher`:**
 - `format_results()` — numbered list with title, source URL, content
@@ -68,33 +75,56 @@ if the missing provider is called.  `__init__` never raises.
 
 ---
 
-### `webai/ticker.py` — Research pipelines
+### `webai/utils.py` — Shared pipeline utilities
+
+Single source of truth for the fan-out / search / deduplicate / filter pipeline shared between
+`TickerResearcher` and `NewsResearcher`.
+
+| Function | Invariant |
+|---|---|
+| `fan_out_queries(model, base_query, expand_ex, decompose_ex, step_back_ex)` → `list[str]` | Always returns `>= [base_query]`; never raises |
+| `run_searches_parallel(searcher, queries, topic, max_workers, days=None)` → `list[SearchResult]` | Never raises; individual failures logged at WARNING |
+| `deduplicate(results)` → `list[SearchResult]` | Pure; never raises |
+| `filter_by_domain(results, trusted_domains)` → `list[SearchResult]` | Never raises; callers handle empty-return fallback |
+
+`utils.py` only imports from `webai.tools` and third-party packages; no circular dependencies.
+
+---
+
+### `webai/ticker.py` — Equity and sector research
 
 | Symbol | Role |
 |---|---|
-| `TickerResearch` (Pydantic) | Validated equity snapshot: sentiment, confidence, key_catalyst, risk_factors, sources, … |
+| `TickerResearch` (Pydantic) | Validated equity snapshot: sentiment, confidence, key_catalyst, risk_factors, earnings_date, sources, … |
 | `SectorResearch` (Pydantic) | Validated sector snapshot: overall_health, key_trends, tailwinds, headwinds, outlook, … |
-| `TickerResearcher` | Orchestrator — `research_ticker(symbol)` and `research_sector(sector)` |
-| `TRUSTED_DOMAINS` | Module-level domain allowlist for result filtering |
+| `TickerResearcher` | Orchestrator — `research_ticker`, `research_portfolio`, `research_sector` |
+| `TRUSTED_DOMAINS` | Module-level domain allowlist (22 entries) for result filtering |
 
-**Both pipelines share the same steps (1–5); only base-query phrase, few-shot examples, and
-synthesis chain differ:**
+**`research_ticker(symbol, company_name=None, earnings_date=None, days_back=None)`**
+- `earnings_date` — appended to base query and referenced in synthesis prompt; post-set on result via `model_copy`
+- `days_back` — passed through to `run_searches_parallel`
+
+**`research_portfolio(symbols, days_back=None)`**
+- `symbols: list[str | tuple[str, str]]`
+- Failures per-ticker logged at WARNING and excluded; batch never aborts
+- Returns `dict[str, TickerResearch]` keyed by uppercase symbol
+
+**Pipeline steps (ticker and sector share steps 1–5; delegation to `webai.utils`):**
 
 1. Build anchor query
-   - Ticker: `"{SYMBOL} {company_name} stock analysis news"`
+   - Ticker: `"{SYMBOL} {company_name} stock analysis news"` (appends earnings_date when provided)
    - Sector: `"{sector} sector financial health outlook"`
-2. `_fan_out_queries(base, expand_examples, decompose_examples, step_back_examples)`
-   — LLM-assisted expand + decompose + step-back; each step in try/except; always returns ≥ `[base_query]`
-3. `_run_searches_parallel` — ThreadPoolExecutor, `search_tavily(q, topic="finance")`
-4. `_deduplicate` — by URL; empty-source results always kept
-5. `_filter_by_domain` — `TRUSTED_DOMAINS` allowlist; falls back to unfiltered if all results removed
+2. `_fan_out_queries` → delegates to `utils.fan_out_queries`
+3. `_run_searches_parallel` → delegates to `utils.run_searches_parallel(topic="finance")`
+4. `_deduplicate` → delegates to `utils.deduplicate`
+5. `_filter_by_domain` → delegates to `utils.filter_by_domain`
 6. Synthesis — `model.with_structured_output(TickerResearch|SectorResearch).invoke(prompt)`
    — two chains built once in `__init__`: `_synthesis_chain` and `_sector_synthesis_chain`
 
 **Invariants:**
 - `_fan_out_queries` always returns ≥ `[base_query]`
 - `_run_searches_parallel` returns empty list, never raises
-- `_filter_by_domain` returns empty list, never raises; falls back in `research_*`
+- `_filter_by_domain` returns empty list, never raises; falls back to unfiltered in `research_*`
 - `_synthesize` / `_synthesize_sector` always raise on failure; never return partial/None
 
 **Few-shot example constants (module-level):**
@@ -103,19 +133,46 @@ synthesis chain differ:**
 
 ---
 
-### `webai/__init__.py` — Public API (6 exports)
+### `webai/news.py` — News research pipeline
+
+| Symbol | Role |
+|---|---|
+| `NewsItem` (Pydantic) | Single news event: headline, summary, sentiment, event_type, relevance_score, tickers_mentioned |
+| `SectorMover` (Pydantic) | Sector movement note for digest summaries |
+| `NewsDigest` (Pydantic) | Structured daily digest: top_stories, market_theme, sector_movers, macro_events, watchlist_alerts |
+| `NewsResearcher` | Orchestrator — four public fetch methods |
+| `_NewsResults` | Internal structured-output wrapper (not exported) |
+
+**Public methods:**
+- `fetch_breaking_news(tickers, days_back=1)` → `list[NewsItem]` sorted by `relevance_score` desc
+- `fetch_macro_news(days_back=1)` → `list[NewsItem]` sorted by `relevance_score` desc
+- `fetch_catalyst_news(ticker, days_back=7)` → `list[NewsItem]` (post-filtered: ticker in tickers_mentioned or score ≥ 0.5)
+- `fetch_daily_digest(tickers, sectors, date, days_back=1)` → `NewsDigest` (raises `RuntimeError` on failure)
+
+**Initialization:** Raises `ValueError` if no Tavily API key is available.
+Chains built once in `__init__`: `_news_chain` (`_NewsResults`), `_digest_chain` (`NewsDigest`).
+
+**Invariants:**
+- `_extract_news_items` never raises; returns `[]` on failure (logged WARNING)
+- `fetch_daily_digest` raises `RuntimeError` on LLM synthesis failure
+- Domain filter falls back to unfiltered if all results are removed (logged WARNING)
+
+**Few-shot example constants:**
+- `_NEWS_EXPAND_EXAMPLES`, `_NEWS_DECOMPOSE_EXAMPLES`, `_NEWS_STEP_BACK_EXAMPLES`
+
+---
+
+### `webai/__init__.py` — Public API (10 exports)
 
 ```python
 from webai import (
-    WebSearcher, SearchProvider, SearchResult,      # tools layer
-    TickerResearcher, TickerResearch, SectorResearch,  # research layer
+    WebSearcher, SearchProvider, SearchResult,                    # tools layer
+    TickerResearcher, TickerResearch, SectorResearch,             # ticker layer
+    NewsResearcher, NewsItem, NewsDigest, SectorMover,            # news layer
 )
 ```
 
-### Empty placeholders (not yet implemented)
-
-- `webai/utils.py` — empty
-- `webai/data/` — empty directory
+---
 
 ## Known Issues
 
