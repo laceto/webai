@@ -26,8 +26,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal, Optional
 from urllib.parse import urlparse
 
+from kitai.transform import extract_attribute_docs, flatten_list_of_lists
 from langchain_core.language_models.chat_models import BaseChatModel
-from query_translation import decompose_query, expand_query, step_back_query
+from kitai.query_translation import decompose_query, expand_query, step_back_query
 
 from webai.tools import SearchResult, WebSearcher
 
@@ -68,9 +69,15 @@ def fan_out_queries(
     queries: list[str] = [base_query]
 
     # --- expand (paraphrases) ---
+    # expand_query returns list[list[ParaphrasedQuery]] (one sublist per input);
+    # flatten_list_of_lists collapses to list[ParaphrasedQuery], then
+    # extract_attribute_docs pulls the string field from each object.
     try:
-        for r in expand_query(model, [base_query], few_shot_examples=expand_examples):
-            q = r.paraphrased_query.strip()
+        flat = flatten_list_of_lists(
+            expand_query(model, [base_query], few_shot_examples=expand_examples)
+        )
+        for q in (extract_attribute_docs(flat, "paraphrased_query") or []):
+            q = q.strip()
             if q and q not in seen:
                 seen[q] = None
                 queries.append(q)
@@ -80,8 +87,11 @@ def fan_out_queries(
 
     # --- decompose (sub-questions) ---
     try:
-        for r in decompose_query(model, [base_query], few_shot_examples=decompose_examples):
-            q = r.decomposed_query.strip()
+        flat = flatten_list_of_lists(
+            decompose_query(model, [base_query], few_shot_examples=decompose_examples)
+        )
+        for q in (extract_attribute_docs(flat, "decomposed_query") or []):
+            q = q.strip()
             if q and q not in seen:
                 seen[q] = None
                 queries.append(q)
@@ -91,10 +101,13 @@ def fan_out_queries(
 
     # --- step-back (macro context) ---
     try:
-        for r in step_back_query(
-            model, [base_query], num_queries=3, few_shot_examples=step_back_examples
-        ):
-            q = r.general_query.strip()
+        flat = flatten_list_of_lists(
+            step_back_query(
+                model, [base_query], num_queries=3, few_shot_examples=step_back_examples
+            )
+        )
+        for q in (extract_attribute_docs(flat, "general_query") or []):
+            q = q.strip()
             if q and q not in seen:
                 seen[q] = None
                 queries.append(q)

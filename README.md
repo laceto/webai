@@ -338,7 +338,6 @@ pipeline implemented in `webai.utils`:
 
 ## Known issues
 
-- **`query_translation` fan-out** — In practice the library logs `WARNING` and degrades to `[base_query]` only. The graceful-degradation invariant holds; the fan-out benefit is not yet realized.
 - **No async support** — `aiohttp` is in `requirements.txt` but unused. Parallel searches run in a `ThreadPoolExecutor`.
 - **`OPENAI_MODEL` env var** — `tools.py` reads `os.getenv("OPENAI_MODEL", "gpt-4o-mini")`; an old `.env` key named `model` has no effect.
 

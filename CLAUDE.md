@@ -87,7 +87,7 @@ Single source of truth for the fan-out / search / deduplicate / filter pipeline 
 | `deduplicate(results)` → `list[SearchResult]` | Pure; never raises |
 | `filter_by_domain(results, trusted_domains)` → `list[SearchResult]` | Never raises; callers handle empty-return fallback |
 
-`utils.py` only imports from `webai.tools` and third-party packages; no circular dependencies.
+`utils.py` only imports from `webai.tools` and third-party packages (`kitai`, `langchain_core`); no circular dependencies.
 
 ---
 
@@ -181,8 +181,3 @@ from webai import (
   (`gpt-4.1-nano`) has no effect; rename it to `OPENAI_MODEL` to take effect.
 - **No async support** — `aiohttp` is listed in `requirements.txt` but unused.  All Tavily searches
   run synchronously within a `ThreadPoolExecutor`.
-- **`query_translation` fan-out degrades silently** — In practice, `expand_query`, `decompose_query`,
-  and `step_back_query` each log a `WARNING` and the pipeline continues with just `[base_query]`
-  when the library returns a bare list rather than objects with `.paraphrased_query` /
-  `.decomposed_query` / `.general_query` attributes.  The graceful-degradation invariant holds, but
-  the fan-out benefit is lost until this upstream issue is resolved.
