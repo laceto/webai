@@ -8,7 +8,8 @@
       "Bash(Rscript -e \"devtools::test\\(filter = ''registry|projection_factory''\\)\")",
       "Bash(tar:*)",
       "Bash(dir C:\\\\Users\\\\l_ace\\\\Desktop\\\\projects\\\\rss_feed:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(ls *.py 2>/dev/null || echo \"no py files at root\")"
     ]
   },
   "outputStyle": "Cognitive Debt–Aware Engineering"
