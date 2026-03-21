@@ -9,7 +9,10 @@
       "Bash(tar:*)",
       "Bash(dir C:\\\\Users\\\\l_ace\\\\Desktop\\\\projects\\\\rss_feed:*)",
       "Bash(python:*)",
-      "Bash(ls *.py 2>/dev/null || echo \"no py files at root\")"
+      "Bash(ls *.py 2>/dev/null || echo \"no py files at root\")",
+      "Bash(venv/Scripts/python -c \"import deepagents; print\\(deepagents.__version__\\)\" 2>&1)",
+      "Bash(venv/Scripts/pip install:*)",
+      "Bash(venv/Scripts/python -c \":*)"
     ]
   },
   "outputStyle": "Cognitive Debt–Aware Engineering"
